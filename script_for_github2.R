@@ -1,0 +1,999 @@
+#Need install of Stan (HMC sampler) (https://mc-stan.org/)
+
+
+#-----Install and open the packages below-----#####
+library(brms) #only works if Stan is installed first!
+library(tidyverse)
+library(ggridges)
+library(scales)
+library(stringr)
+library(ggridges)
+library(cowplot)
+library(janitor)
+library(RCurl)
+library(lubridate)
+
+
+#-----Read in data from GitHub ####
+#emerge_data = emergence data, quist_bwbu = data from Quist (2012), 
+#dm = dry mass of individual insects, lit_est = literature estimates of emergence,
+#reach_km = length of river segments from Quist 2012
+emerge_data <- read.csv(text=getURL("https://raw.githubusercontent.com/jswesner/nps_emergence/master/emerge_data.csv"))
+quist_bwbu <- read.csv(text=getURL("https://raw.githubusercontent.com/jswesner/nps_emergence/master/quist_bwbu.csv"))
+dm <- read.csv(text=getURL("https://raw.githubusercontent.com/jswesner/nps_emergence/master/dm.csv"))
+lit_est <- read.csv(text=getURL("https://raw.githubusercontent.com/jswesner/nps_emergence/master/lit_est.csv"))
+reach_km <- read.csv(text=getURL("https://raw.githubusercontent.com/jswesner/nps_emergence/master/reach_km.csv"))
+
+
+
+#------Backwater summaries-------
+quist_bwbu%>%
+  drop_na()%>%
+  group_by(abv,year2, Reach)%>%
+  summarize('sum'=sum(ha))%>%
+  spread(abv,sum)%>%
+  clean_names() %>%
+  print(n=40)
+
+
+#------MODEL 1 - Individual dry mass-----
+#------Generalized linear model for individual dry mass
+mdm<-brm(ind_mg_dry~1,data=dm,family=Gamma(link="log"),
+         prior(normal(0,2),class="Intercept"),
+         cores=4)
+
+pp_check(mdm,type="boxplot") #posterior predictive check
+mdm #model outcome
+postmdm<-posterior_samples(mdm) #extract posterior samples from each parameter
+dm_p<-data.frame(postdm = exp(postmdm$b_Intercept)) # make a data frame of posteriors
+mean(dm_p$postdm) #use this as mean for emergence dataset (i.e. ind mass = rnorm(mean(dm_p$postdm),sd(dm_p$post_dm)))
+sd(dm_p$postdm) #use this as sd for emergence dataset (i.e. ind mass = rnorm(mean(dm_p$postdm),sd(dm_p$post_dm)))
+
+
+
+
+#------Estimate dry mass of samples using model outcome from dry mass regression (model mdm)
+emerge_data$est_indmg<-rnorm(nrow(emerge_data),mean(dm_p$postdm),sd(dm_p$postdm)) #add column of samples from mean and sd of post_dm
+emerge_data$mgm2dayDM<-emerge_data$indm2day*emerge_data$est_indmg
+emerge_data$mgm2dayDM01 <- emerge_data$mgm2dayDM + 0.01 # add 0.01 to prevent zeros (needed for Gamma).
+
+#------ MODEL 2 - GAMM for emergence------
+m44<-brm(mgm2dayDM01~s(day_n)+(1|loc/year),data=emerge_data,family=Gamma(link="log"),
+         prior=c(prior(normal(2.3,3.9),class="Intercept"),
+                 prior(cauchy(0,1),class="sd")),
+         chains=4,iter=2000,cores=4)
+
+pp_check(m44,type="boxplot")#posterior predictive check
+summary(m44, priors=T) #model outcome and priors
+plot(marginal_effects(m44),points=TRUE) #coarse plot of marginal effects
+
+
+
+
+
+
+
+
+#------Extract fitted estimates from m44 and summarize them------
+#------Values will differ a bit from those in the ms due to simulation error, but should be close
+#Insect emergence was lowest in late May...ranged between
+testdata2<-data.frame(day_n=seq(17679,17791,length=112))
+
+m44fit2s <- fitted(m44,summary=F,newdata = testdata2, re_formula = NA )
+
+as_tibble(m44fit2s) %>% 
+  select(V1,V2,V3,V4) %>%
+  mutate(May_mgCm2d = (((V1+V2+V3+V4)/4)-0.053*(V1+V2+V3+V4)/4)/2) %>% #sum last days of May in the sample, then convert to carbon units
+  summarize(median =median(May_mgCm2d),
+            upper95 = quantile(May_mgCm2d,probs=0.975),
+            lower95 = quantile(May_mgCm2d, probs=0.025))
+
+#It peaked in mid-June, ranging between... 
+as_tibble(m44fit2s) %>% 
+  select(V26) %>%
+  mutate(mid_June_mgCm2d = ((V26-(0.053*V26))/2)) %>% #isolate mid-June (day 26, i.e. column v26), then convert to carbon units
+  summarize(median =median(mid_June_mgCm2d),
+            upper95 = quantile(mid_June_mgCm2d,probs=0.975),
+            lower95 = quantile(mid_June_mgCm2d, probs=0.025))
+
+#by late September... 
+as_tibble(m44fit2s) %>% 
+  select(V112) %>%
+  mutate(mid_June_mgCm2d = ((V112-(0.053*V112))/2)) %>% #isolate last day of sample (day112, i.e. column 112), then convert to carbon units
+  summarize(median =median(mid_June_mgCm2d),
+            upper95 = quantile(mid_June_mgCm2d,probs=0.975),
+            lower95 = quantile(mid_June_mgCm2d, probs=0.025))
+
+
+#In total, between X and X emerged from backwaters annually...
+as_tibble(m44fit2s) %>%
+  mutate(tot_mgdm2y = rowSums(.)) %>%
+  select(tot_mgdm2y) %>%
+  mutate(tot_mgCm2y = ((tot_mgdm2y-(0.053*tot_mgdm2y))/2)) %>% #sum across all days, then convert to carbon units
+  summarize(median =median(tot_mgCm2y/1000), #divide by 1000 to convert to grams
+            upper95 = quantile(tot_mgCm2y/1000,probs=0.975),
+            lower95 = quantile(tot_mgCm2y/1000, probs=0.025))
+
+
+#Table 2 fitted results
+as_tibble(m44fit2s) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  summarize(median_gDM =median(totmgdm2y)/1000,
+            upper95_gDM = quantile(totmgdm2y,probs=0.975)/1000,
+            lower95_gDM = quantile(totmgdm2y, probs=0.025)/1000,
+            median_gC =median(totmgCm2y)/1000,
+            upper95_gC = quantile(totmgCm2y,probs=0.975)/1000,
+            lower95_gC = quantile(totmgCm2y, probs=0.025)/1000,
+            median_kJ =median((totmgdm2y - 0.053*totmgdm2y))/1000*23.012,
+            upper95_kJ = quantile((totmgdm2y - 0.053*totmgdm2y),probs=0.975)/1000*23.012,
+            lower95_kJ = quantile((totmgdm2y - 0.053*totmgdm2y), probs=0.025)/1000*23.012) %>%
+  gather()
+
+
+
+
+
+
+
+
+
+
+#-----Extract predictions for new sites m44 on each day -----
+testdata2<-data.frame(day_n=seq(17679,17791,length=112),
+                      loc="new",
+                      year="new")
+m44pr2s<-data.frame(predict(m44,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                            allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+
+
+#----- Total predicted yearly emergence from model m44 -----#####
+#Based on the posterior predictive distribution, new sites...produce between... and Table 2
+as_tibble(m44pr2s) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  summarize(median_gDM =median(totmgdm2y/1000),
+            upper95_gDM = quantile(totmgdm2y/1000,probs=0.975),
+            lower95_gDM = quantile(totmgdm2y/1000, probs=0.025),
+            median_gC =median(totmgCm2y)/1000,
+            upper95_gC = quantile(totmgCm2y,probs=0.975)/1000,
+            lower95_gC = quantile(totmgCm2y, probs=0.025)/1000,
+            median_kJ =median((totmgdm2y - 0.053*totmgdm2y))/1000*23.012,
+            upper95_kJ = quantile((totmgdm2y - 0.053*totmgdm2y),probs=0.975)/1000*23.012,
+            lower95_kJ = quantile((totmgdm2y - 0.053*totmgdm2y), probs=0.025)/1000*23.012) %>%
+  gather()
+
+
+
+
+#######Figure 2 - Emergence over time #####
+
+m44pr2s_summary <- as.data.frame(m44pr2s) %>%
+  gather(day, mgDMd, "X1":"X112") %>%
+  mutate(day = as.numeric(str_sub(day, start=2, end=4))) %>%
+  group_by(day) %>%
+  summarize(median = median(mgDMd),
+            high95 = quantile(mgDMd, probs=0.975),
+            low95 = quantile(mgDMd,probs=0.025))
+
+m44fit2s_summary <- as.data.frame(m44fit2s) %>%
+  gather(day, mgDMd,"V1":"V112") %>%
+  mutate(day = as.numeric(str_sub(day, start=2, end=4))) %>%
+  group_by(day) %>%
+  summarize(median = median(mgDMd),
+            high95 = quantile(mgDMd, probs=0.975),
+            low95 = quantile(mgDMd,probs=0.025))
+  
+
+
+Figure_2 <- ggplot()+
+  geom_ribbon(data=m44pr2s_summary,aes(x=day,y=(median-0.053*median)/2, #y-values converted to carbon units
+                                       ymin=(low95-0.053*low95)/2,
+                                       ymax=(high95-0.053*high95)/2,fill="predicted"))+
+  geom_ribbon(data=m44fit2s_summary,aes(x=day,y=(median-0.053*median)/2, #y-values converted to carbon units
+                                         ymin=(low95-0.053*low95)/2,
+                                         ymax=(high95-0.053*high95)/2,fill="fitted"))+
+    geom_point(data=emerge_data,aes(x=day_n-17678,y=(mgm2dayDM01-0.053*mgm2dayDM01)/2,shape=as.factor(year)),
+             size=1.8,alpha=.5)+
+  scale_y_log10(breaks=c(0.1,1,10,100,1000),labels=c("0.1","1","10","100","1000"))+
+  coord_cartesian(ylim=c(0.02,1000))+
+  scale_fill_manual(values=c("fitted"=alpha('grey12',.35),
+                             "predicted"=alpha('grey12',.2),
+                             "ft2"=alpha('green',.28)))+
+  scale_shape_manual(values=c(15,16,17,18))+
+  theme_bw()+
+  geom_line(data=m44fit2s_summary,aes(x=day,y=(median-0.053*median)/2, #y-values converted to carbon units
+                                      ymin=(low95-0.053*low95)/2,
+                                      ymax=(high95-0.053*high95)/2),size=1,color="black")+
+  scale_x_continuous(breaks=c(5,19,35,49,66,81,98,111),labels=c("Jun 1",
+                                                                "Jun 15",
+                                                                "Jul 1",
+                                                                "Jul 15",
+                                                                "Aug 1",
+                                                                "Aug 15",
+                                                                "Sep 1",
+                                                                "Sep 15"))+
+  xlab("")+
+  ylab(expression(atop("Insect emergence", paste("(mgC/m"^2,"/day)"))))+
+  theme(text=element_text(size=12),
+        panel.grid=element_blank(),
+        axis.title.y=element_text(size=12),
+        axis.text.x=element_text(size=9),
+        legend.title=element_blank())
+
+Figure_2
+
+
+
+
+#-----Backwater estimates#
+as_tibble(m44pr2s) %>% 
+  select(X4) %>%
+  mutate(May_kjd = X4/1000*23.012*24000) %>% #last day of May emergence, then convert from mg to gDM/m2/d, then to kJ units, then multiply by 24000 (AREA OF GUNDERSON)
+  summarize(median =median(May_kjd),
+            upper95 = quantile(May_kjd,probs=0.975),
+            lower95 = quantile(May_kjd, probs=0.025),
+            birds_low_cost_community = median(May_kjd/3838), #median proportion of bird energetic costs that emergence from Gunderson backwater could support. - For lowest cost community
+            birds_high_cost_community = median(May_kjd/4656))
+
+#to X subsidies in mid-June... 
+as_tibble(m44pr2s) %>% 
+  select(X26) %>%
+  mutate(June_kjd = X26/1000*23.012*24000) %>% #last day of June emergence, then convert from mg to gDM/m2/d, then to kJ units, then multiply by 24000 (AREA OF GUNDERSON)
+  summarize(median =median(June_kjd),
+            upper95 = quantile(June_kjd,probs=0.975),
+            lower95 = quantile(June_kjd, probs=0.025),
+            birds_low_cost_community = median(June_kjd/3838),
+            birds_high_cost_community = median(June_kjd/4656))
+
+#to X in mid-September... 
+as_tibble(m44pr2s) %>% 
+  select(X112) %>%
+  mutate(Sep_kjd = X112/1000*23.012*24000) %>% #last day of Sep emergence, then convert from mg to gDM/m2/d, then to kJ units, then multiply by 24000 (AREA OF GUNDERSON)
+  summarize(median =median(Sep_kjd),
+            upper95 = quantile(Sep_kjd,probs=0.975),
+            lower95 = quantile(Sep_kjd, probs=0.025),
+            birds_low_cost_community = median(Sep_kjd/3838),
+            birds_high_cost_community = median(Sep_kjd/4656))
+
+
+
+
+
+###Figure 3 - Predicted total emergence in 1890, 2006, and 2012 ####
+#Get total emergence by multiplying per m2 emergence by total area of off-channel habitat from Quist (2012)
+m44totp3 <- as_tibble(m44pr2s) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(mgCm2y = ((totmgdm2y-(0.053*totmgdm2y))/2)) %>%
+  select(-totmgdm2y)
+
+m44totp3$X1890_0_mgyr<-m44totp3$mgCm2y*127.41*10000 #In reach zero, in 1890, there were 127.41 hectares of off-channel habitat, which is 127.41*10000 m2
+m44totp3$X1890_2_mgyr<-m44totp3$mgCm2y*286.64*10000 #Same as above, but for 286.64 ha
+m44totp3$X1890_4_mgyr<-m44totp3$mgCm2y*241.11*10000 #etc.
+m44totp3$X1890_8_mgyr<-m44totp3$mgCm2y*62*10000
+m44totp3$X1890_10_mgyr<-m44totp3$mgCm2y*99.8*10000
+m44totp3$X1890_11_mgyr<-m44totp3$mgCm2y*383.66*10000
+m44totp3$X1890_12_mgyr<-m44totp3$mgCm2y*3904.22*10000
+m44totp3$X1890_13_mgyr<-m44totp3$mgCm2y*2206.23*10000
+m44totp3$X1950_0_mgyr<-m44totp3$mgCm2y*58.94*10000
+m44totp3$X1950_2_mgyr<-m44totp3$mgCm2y*702.74*10000
+m44totp3$X1950_4_mgyr<-m44totp3$mgCm2y*181.54*10000
+m44totp3$X1950_8_mgyr<-m44totp3$mgCm2y*10.79*10000
+m44totp3$X1950_10_mgyr<-m44totp3$mgCm2y*70.42*10000
+m44totp3$X1950_11_mgyr<-m44totp3$mgCm2y*0
+m44totp3$X1950_12_mgyr<-m44totp3$mgCm2y*0
+m44totp3$X1950_13_mgyr<-m44totp3$mgCm2y*1213.15*10000
+m44totp3$X2006_0_mgyr<-m44totp3$mgCm2y*100.54*10000
+m44totp3$X2006_2_mgyr<-m44totp3$mgCm2y*1350.51*10000
+m44totp3$X2006_4_mgyr<-m44totp3$mgCm2y*323.5*10000
+m44totp3$X2006_8_mgyr<-m44totp3$mgCm2y*272.04*10000
+m44totp3$X2006_10_mgyr<-m44totp3$mgCm2y*214.33*10000
+m44totp3$X2006_11_mgyr<-m44totp3$mgCm2y*105.04*10000
+m44totp3$X2006_12_mgyr<-m44totp3$mgCm2y*1355.86*10000
+m44totp3$X2006_13_mgyr<-m44totp3$mgCm2y*804.45*10000
+m44totp3$X2012_0_mgyr<-m44totp3$mgCm2y*0
+m44totp3$X2012_2_mgyr<-m44totp3$mgCm2y*0
+m44totp3$X2012_4_mgyr<-m44totp3$mgCm2y*474.44*10000
+m44totp3$X2012_8_mgyr<-m44totp3$mgCm2y*313.28*10000
+m44totp3$X2012_10_mgyr<-m44totp3$mgCm2y*251.83*10000
+m44totp3$X2012_11_mgyr<-m44totp3$mgCm2y*88.86*10000
+m44totp3$X2012_12_mgyr<-m44totp3$mgCm2y*1854.8*10000
+m44totp3$X2012_13_mgyr<-m44totp3$mgCm2y*1528.75*10000
+
+
+
+Figure3 <- m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = mgy/1000000) %>%  #convert milligrams of C to kilograms of C
+  filter(reach >3) %>%
+  select(year,kgy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,kgy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totC = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year) %>%
+  filter(year!=1950) %>%
+  ggplot(aes(x=year, y=totC))+
+  geom_boxplot(outlier.shape=NA,fill="grey",width=.6)+
+  coord_cartesian(ylim=c(1000,500000))+
+  scale_y_continuous(labels=comma)+
+  ylab("Predicted annual emergence (kgC/yr)")+
+  theme_classic()+
+  xlab("")+
+  theme(text=element_text(size=13))+
+  NULL
+
+Figure3
+
+
+
+
+
+#######Figure 4 - Emergence by segment in kgC/km/y ##########
+#-----Convert emergence production to area-wide production for each segment. Multiply total mg C/m2/year) by area (m2) of water in each reach(0-13) and year (1890-2006). Then gather and ifelse to separate into reach/year
+
+
+#Multiplying that production by the area of off-channel habitats along the lower six segments,
+#revealed that annual insect production in 1890 ranged between....
+m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = mgy/1000000) %>%  #convert milligrams of C to kilograms of C
+  filter(reach >3) %>%
+  select(year,kgy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,kgy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totC = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year) %>%
+  summarize(median = median(totC),
+            lower95 = quantile(totC, probs=0.025),
+            upper95 = quantile(totC, probs=0.975))
+
+
+
+# That represents a median loss of ..
+m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = mgy/1000000) %>%  #convert milligrams of C to kilograms of C
+  filter(reach >3) %>%
+  select(year,kgy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,kgy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totC = r4+r8+r10+r11+r12+r13) %>%
+  select(year,iter,totC) %>%
+  spread(year,totC)%>%
+  rename (y1890 = '1890',
+          y1950 = '1950',
+          y2006 = '2006',
+          y2012 = '2012') %>%
+  mutate(diff9012 = y2012-y1890,
+         diff9050 = y1950-y1890,
+         diff9006 = y2006-y1890) %>%
+  select(iter,diff9012,diff9050,diff9006) %>%
+  gather(year, kgy, -iter) %>%
+  group_by(year)%>%
+  summarize(median = median(kgy),
+            lower95 = quantile(kgy, probs=0.025),
+            upper95 = quantile(kgy, probs=0.975))
+
+
+#Of the 36,000 kgC lost between...~80% was lost in segment 12.
+m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = mgy/1000000) %>%  #convert milligrams of C to kilograms of C
+  filter(reach >3) %>%
+  select(year,kgy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,kgy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totC = r12) %>% #Limit summary to reach 12 only
+  select(year,iter,totC) %>%
+  spread(year,totC)%>%
+  rename (y1890 = '1890',
+          y1950 = '1950',
+          y2006 = '2006',
+          y2012 = '2012') %>%
+  mutate(diff9012 = y2012-y1890,
+         diff9050 = y1950-y1890,
+         diff9006 = y2006-y1890) %>%
+  select(iter,diff9012,diff9050,diff9006) %>%
+  gather(year, kgy, -iter) %>%
+  group_by(year)%>%
+  summarize(median = median(kgy), # divide this result by 36000 to arrive at 80% in reach 12
+            lower95 = quantile(kgy, probs=0.025),
+            upper95 = quantile(kgy, probs=0.975))
+
+reach_km$year <- as.factor(reach_km$year)
+
+kgC_y <- m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = ((mgy-0.053*mgy)/2)/1000000) %>%  #convert to milligrams of C, then to kilograms of C
+  select(year,kgy,reach,iter)%>%
+  left_join(reach_km, by=c("reach","year")) %>%
+  mutate(kgC_m_y = kgy/km) %>%
+  add_case(year=1950,kgy=0,reach=11,km=1,reach_yr="X1950_11_mgyr",kgC_m_y=0) #adds placeholder to plot a zero on this date (no data available)
+
+
+Figure4<-ggplot(data=kgC_y,aes(x=as.factor(reach),y=kgC_m_y,fill=year))+
+  geom_boxplot(outlier.shape=NA,width=.6)+
+  #geom_violin(width=0.2,alpha=0.2)+
+  scale_fill_manual(values=c("grey30","grey50","grey70","grey90"))+
+  coord_cartesian(ylim=c(1,450))+
+  #scale_y_continuous(breaks=c(1,100000))+
+  #geom_text()+
+  xlab(expression(paste(italic("upstream"), "                             Segment                            ",italic("downstream"))))+
+  ylab("Predicted annual emergence from backwaters (kgC/km/yr)")+
+  annotate("text",x=c(1.26,2.26,5.92,6.92),y=10,label="NA",size=2)+
+  theme_classic()+
+  theme(text=element_text(size=13))
+Figure4
+
+
+m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = ((mgy-0.053*mgy)/2)/1000000) %>%  #convert to milligrams of C, then to kilograms of C
+  select(year,kgy,reach,iter)%>%
+  left_join(reach_km, by=c("reach","year")) %>%
+  mutate(kgC_m_y = kgy/km) %>%
+  filter(reach == 8) %>%
+  mutate(id = rep(1:4000,4))%>%
+  spread(year,kgy)
+
+
+
+
+
+
+
+
+
+#Supplementary Information#####
+
+
+#Figure S1: Plot of dry mass by month------
+ggplot(data=dm, aes(x=month, y=ind_mg_dry,color=as.factor(year)))+
+  geom_point(position=position_jitterdodge(dodge.width=0.6),shape=1,alpha=0.8)+
+  facet_wrap(~order)+
+  ylab("dry mass of individual insects (mgDM)")+
+  theme(legend.title=element_blank())
+
+####Figure S2 - Priors vs post ####
+
+summary(m44,priors=TRUE)
+##Priors##
+int<-rnorm(1000,log(10),log(50))
+#sd_loc<-rcauchy(1000,0,10)
+#sd__locyr<-rcauchy(1000,0,10)
+b_s_day_n<-rstudent_t(1000,3,0,10)
+#shape<-rgamma(10000,0.01,scale=0.01)
+
+priorsm44<-data.frame(int,b_s_day_n)
+
+
+##posteriors###
+int<-rnorm(1000,3.2,.48)
+#sd_loc<-rcauchy(1000,.59,.54)
+#sd__locyr<-rcauchy(1000,.76,.35)
+b_s_day_n<-rstudent_t(1000,10,5.3,2.26)
+#shape<-rgamma(1000,1.18,scale=0.14)
+
+postsm44<-data.frame(int,b_s_day_n)
+
+priorsm44<-gather(priorsm44,parameter,value)
+postsm44<-gather(postsm44,parameter,value)
+priorsm44$prior_post<-"prior"
+postsm44$prior_post<-"post"
+
+
+#rbind priors and posts##
+pr_post<-rbind(priorsm44,postsm44)
+pr_post$parameter<-as.factor(pr_post$parameter)
+
+Figure_S2<-ggplot(pr_post,aes(value,fill=prior_post),alpha=0.4)+
+  geom_density(alpha=0.2)+
+  scale_fill_manual(values=c('blue','grey'))+
+  coord_cartesian(xlim=c(-20,20))+
+  facet_wrap(~parameter,scales="free")+
+  theme_classic()+
+  theme(axis.line.y = element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.ticks.y=element_blank())
+Figure_S2
+
+
+
+
+
+
+
+
+
+#----- Figure S3 - Tests for bias ------####
+#First run the alternative models and summarize them.
+#ALL sites - MAIN MODEL - ALREADY RAN THIS IN THE BEGINNING
+m44pr2s
+all_sites <- as_tibble(m44pr2s) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  select(totmgCm2y) %>%
+  mutate(model = "all_sites")
+
+#Now run four models with single sites left out each time
+#without 'above' sites
+m44_noabovem<-brm(mgm2dayDM01~s(day_n,k=-1)+(1|loc/year),data=subset(emerge_data,loc!="above"),family=Gamma(link="log"),
+                  prior=c(prior(normal(2.3,3.9),class="Intercept"),
+                          prior(cauchy(0,1),class="sd")),
+                  chains=4,iter=2000, cores=4)
+m44_noabovem
+pp_check(m44_noabovem,type="boxplot")
+
+testdata2<-data.frame(day_n=seq(17679,17791,length=112),
+                      loc="new",
+                      year="new")
+m44pr_no_above<-data.frame(predict(m44_noabovem,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                   allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+
+#posterior predictions for m44_noabovem, i.e. the model without "above" sites.
+no_above <- as_tibble(m44pr_no_above) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  select(totmgCm2y) %>%
+  mutate(model = "no_above")
+
+
+
+#without 'below' sites
+m44_nobelowm<-brm(mgm2dayDM01~s(day_n,k=-1)+(1|loc/year),data=subset(emerge_data,loc!="below"),family=Gamma(link="log"),
+                  prior=c(prior(normal(2.3,3.9),class="Intercept"),
+                          prior(cauchy(0,1),class="sd")),
+                  chains=4,iter=2000, cores=4)
+m44_nobelowm
+pp_check(m44_nobelowm,type="boxplot")
+testdata2<-data.frame(day_n=seq(17679,17791,length=112),
+                      loc="new",
+                      year="new")
+m44pr_no_below<-data.frame(predict(m44_nobelowm,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                   allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+no_below <- as_tibble(m44pr_no_below) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  select(totmgCm2y) %>%
+  mutate(model = "no_below")
+
+
+#without 'large' sites
+m44_nolargem<-brm(mgm2dayDM01~s(day_n,k=-1)+(1|loc/year),data=subset(emerge_data,trt=="ambient"&loc!="largepool"),family=Gamma(link="log"),
+                  prior=c(prior(normal(2.3,3.9),class="Intercept"),
+                          prior(cauchy(0,1),class="sd")),
+                  chains=4,iter=2000, cores=4)
+m44_nolargem
+pp_check(m44_nolargem,type="boxplot")
+
+m44pr_no_large<-data.frame(predict(m44_nolargem,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                   allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+no_large <- as_tibble(m44pr_no_large) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  select(totmgCm2y) %>%
+  mutate(model = "no_large")
+
+
+
+#without 'small' sites
+m44_nosmallm<-brm(mgm2dayDM01~s(day_n,k=-1)+(1|loc/year),data=subset(emerge_data,trt=="ambient"&loc!="smallpool"),family=Gamma(link="log"),
+                  prior=c(prior(normal(2.3,3.9),class="Intercept"),
+                          prior(cauchy(0,1),class="sd")),
+                  chains=4,iter=2000, cores=4)
+m44_nosmallm
+pp_check(m44_nolargem,type="boxplot")
+
+m44pr_no_small<-data.frame(predict(m44_nosmallm,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                   allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+
+
+no_small <- as_tibble(m44pr_no_small) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2) %>%
+  select(totmgCm2y) %>%
+  mutate(model = "no_small")
+
+
+#Combine posteriors from the four subset models above plus the main model and plot comparisons
+compare_all <- rbind(all_sites, no_above, no_below, no_large, no_small) # combine posteriors
+compare_all$fill <- ifelse(compare_all$model=="all_sites","black","grey")
+
+FigureS3 <- ggplot(compare_all,aes(x=totmgCm2y/1000,y=model,fill=fill))+
+  geom_density_ridges2()+
+  scale_fill_grey(guide=FALSE)+
+  scale_x_log10(breaks=c(0.01,0.1,1,10,100,1000),labels=comma)+
+  coord_cartesian(xlim=c(0.01,1000))+
+  theme_classic()+
+  theme(text=element_text(size=13))+
+  xlab(expression(paste("Annual emergence production"," (gC/m"^2,"/y)")))
+
+
+FigureS3
+
+
+
+
+#----Figure S4-----
+#add study id to the data for posterior predictions from the original model
+all_sites$study <- "Posterior predictive distribution present study"
+
+#plot posterior prediction versus individual estimates from the literature survey
+Figure_S4<-ggplot()+
+  geom_vline(data=lit_est,aes(xintercept=gCm2yr,size=size, color=size),alpha=.5)+
+  geom_density(data=all_sites,aes(x=totmgCm2y/1000,fill=study))+
+  theme_classic()+
+  scale_color_manual(values=c("#696969","#2e75b6"))+
+  coord_cartesian(xlim=c(0.05,100))+
+  scale_size_manual(values=c(0.2,3))+
+  theme(text=element_text(size=12),
+        panel.grid=element_blank(),
+        axis.title.y=element_text(size=12),
+        axis.text.x=element_text(size=11),
+        legend.title=element_blank())+
+  scale_fill_manual(values='grey50')+
+  scale_y_continuous()+
+  xlab(expression(paste("Annual emergence production"," (gC/m"^2,"/y)")))+
+  ylab("posterior density")+
+  scale_x_log10(breaks=c(0.1,1,10,100),labels=c("0.1","1","10","100"))+
+  annotation_logticks(sides="b",mid=unit(0.1,"cm"))+
+  NULL
+Figure_S4
+
+
+
+#----Figure S6 - Prior sensitivity----#### 
+
+#-----Model with wider intercept prior----#
+m44alt_sd<-brm(mgm2dayDM01~s(day_n)+(1|loc/year),data=emerge_data,family=Gamma(link="log"),
+               prior=c(prior(normal(2.3,4.6),class="Intercept"), #sd is wider than original model (log(100) vs log(50))
+                       prior(cauchy(0,1),class="sd")),
+               chains=4,iter=2000,cores=4)
+
+pp_check(m44alt_sd,type="boxplot")
+
+#-----Model with zero centered prior-----#
+m44cent_zero <-brm(mgm2dayDM01~s(day_n)+(1|loc/year),data=emerge_data,family=Gamma(link="log"),
+                   prior=c(prior(normal(1,7),class="Intercept"), #centered on zero (i.e. exp(0) with sd of exp(7) = 1096 ) with 
+                           prior(cauchy(0,1),class="sd")),
+                   chains=4,iter=2000, cores=4)
+
+pp_check(m44cent_zero,type="boxplot")
+
+#extract posterior predictions
+testdata2<-data.frame(day_n=seq(17679,17791,length=112),
+                      loc="new",
+                      year="new")
+original_predict <- data.frame(predict(m44,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                       allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+altsd_predict<-data.frame(predict(m44alt_sd,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                  allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+zero_predict <- data.frame(predict(m44cent_zero,type="response",newdata=testdata2,re_formula=~(1|loc/year),
+                                   allow_new_levels = TRUE,summary=FALSE,sample_new_levels = "gaussian"))
+
+#-----Sum total emergence  
+orig_pred <- as_tibble(original_predict) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2,
+         model = "original model")
+
+altsd_pred <- as_tibble(altsd_predict) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2,
+         model = "wider sd")
+
+zero_pred <- as_tibble(zero_predict) %>%
+  mutate(totmgdm2y = rowSums(.)) %>%
+  select(totmgdm2y) %>%
+  mutate(totmgCm2y =(totmgdm2y - 0.053*totmgdm2y)/2,
+         model = "centered on zero")
+
+
+prior_pred_all <- rbind(orig_pred, altsd_pred, zero_pred)
+
+FigureS5 <- prior_pred_all %>% 
+  rbind(orig_pred, altsd_pred,zero_pred) %>%
+  mutate (gCm2y = totmgCm2y/1000) %>%
+  ggplot(aes(x=gCm2y, color=model))+
+  geom_density()+
+  scale_color_grey()+
+  theme_classic()+
+  scale_x_log10()+
+  xlab(expression(paste("Annual emergence production"," (gC/m"^2,"/d)")))+
+  ylab("posterior density")
+
+FigureS5
+
+
+
+
+#-----Figure S7 - Emergence by segment in kgC/y  ##########
+kgC_y <- m44totp3 %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgy,-iter,-mgCm2y) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         kgy = ((mgy-0.053*mgy)/2)/1000000) %>%  #convert to milligrams of C, then to kilograms of C
+  select(year,kgy,reach,iter)%>%
+  left_join(reach_km, by=c("reach","year")) %>%
+  mutate(kgC_m_y = kgy/km) %>%
+  add_case(year=1950,kgy=0,reach=11,km=1,reach_yr="X1950_11_mgyr",kgC_m_y=0) #adds placeholder to plot a zero on this date (no data available)
+
+
+FigureS6<-ggplot(data=kgC_y,aes(x=as.factor(reach),y=kgy,fill=year))+
+  geom_boxplot(outlier.shape=NA,width=.6)+
+  #geom_violin(width=0.2,alpha=0.2)+
+  scale_fill_manual(values=c("grey30","grey50","grey70","grey90"))+
+  coord_cartesian(ylim=c(1,125000))+
+  #scale_y_continuous(breaks=c(1,100000))+
+  #geom_text()+
+  xlab(expression(paste(italic("upstream"), "                             Segment                            ",italic("downstream"))))+
+  ylab("Predicted annual emergence from backwaters (kgC/yr)")+
+  annotate("text",x=c(1.26,2.26,5.92,6.92),y=10,label="NA",size=2)+
+  theme_classic()+
+  theme(text=element_text(size=13))
+FigureS6
+
+#----Table S1 ----
+as_tibble(emerge_data) %>%
+  mutate(date = mdy(date))%>%
+  select(date,citation,response,loc) %>%
+  group_by(citation,loc,date) %>%
+  summarize(n_traps = n(),
+            area_collected = n_traps*0.36)%>%
+  arrange(date)
+
+
+
+#-----Table S4----
+compare_all %>%
+  group_by(model) %>%
+  summarize(median = median(totmgCm2y/1000),
+            lower95 = quantile(totmgCm2y/1000,probs=0.025),
+            upper95 = quantile(totmgCm2y/1000,probs=0.975))
+
+
+
+
+
+
+
+
+
+#----Bird Conversions ----
+
+#First summarize posterior predicted emergence (file m44pr2s created in earlier code)
+m44totp3_dm <- as_tibble(m44pr2s) %>%
+  mutate(mgdm2y = rowSums(.)) %>%
+  select(mgdm2y) 
+
+median(m44totp3_dm$mgdm2y)
+
+#convert to total by multiplying by the area of m2 in the Missouri
+m44totp3_dm$X1890_0_mgyr<-m44totp3_dm$mgdm2y*127.41*10000
+m44totp3_dm$X1890_2_mgyr<-m44totp3_dm$mgdm2y*286.64*10000
+m44totp3_dm$X1890_4_mgyr<-m44totp3_dm$mgdm2y*241.11*10000
+m44totp3_dm$X1890_8_mgyr<-m44totp3_dm$mgdm2y*62*10000
+m44totp3_dm$X1890_10_mgyr<-m44totp3_dm$mgdm2y*99.8*10000
+m44totp3_dm$X1890_11_mgyr<-m44totp3_dm$mgdm2y*383.66*10000
+m44totp3_dm$X1890_12_mgyr<-m44totp3_dm$mgdm2y*3904.22*10000
+m44totp3_dm$X1890_13_mgyr<-m44totp3_dm$mgdm2y*2206.23*10000
+m44totp3_dm$X1950_0_mgyr<-m44totp3_dm$mgdm2y*58.94*10000
+m44totp3_dm$X1950_2_mgyr<-m44totp3_dm$mgdm2y*702.74*10000
+m44totp3_dm$X1950_4_mgyr<-m44totp3_dm$mgdm2y*181.54*10000
+m44totp3_dm$X1950_8_mgyr<-m44totp3_dm$mgdm2y*10.79*10000
+m44totp3_dm$X1950_10_mgyr<-m44totp3_dm$mgdm2y*70.42*10000
+m44totp3_dm$X1950_11_mgyr<-m44totp3_dm$mgdm2y*0
+m44totp3_dm$X1950_12_mgyr<-m44totp3_dm$mgdm2y*0
+m44totp3_dm$X1950_13_mgyr<-m44totp3_dm$mgdm2y*1213.15*10000
+m44totp3_dm$X2006_0_mgyr<-m44totp3_dm$mgdm2y*100.54*10000
+m44totp3_dm$X2006_2_mgyr<-m44totp3_dm$mgdm2y*1350.51*10000
+m44totp3_dm$X2006_4_mgyr<-m44totp3_dm$mgdm2y*323.5*10000
+m44totp3_dm$X2006_8_mgyr<-m44totp3_dm$mgdm2y*272.04*10000
+m44totp3_dm$X2006_10_mgyr<-m44totp3_dm$mgdm2y*214.33*10000
+m44totp3_dm$X2006_11_mgyr<-m44totp3_dm$mgdm2y*105.04*10000
+m44totp3_dm$X2006_12_mgyr<-m44totp3_dm$mgdm2y*1355.86*10000
+m44totp3_dm$X2006_13_mgyr<-m44totp3_dm$mgdm2y*804.45*10000
+m44totp3_dm$X2012_0_mgyr<-m44totp3_dm$mgdm2y*0
+m44totp3_dm$X2012_2_mgyr<-m44totp3_dm$mgdm2y*0
+m44totp3_dm$X2012_4_mgyr<-m44totp3_dm$mgdm2y*474.44*10000
+m44totp3_dm$X2012_8_mgyr<-m44totp3_dm$mgdm2y*313.28*10000
+m44totp3_dm$X2012_10_mgyr<-m44totp3_dm$mgdm2y*251.83*10000
+m44totp3_dm$X2012_11_mgyr<-m44totp3_dm$mgdm2y*88.86*10000
+m44totp3_dm$X2012_12_mgyr<-m44totp3_dm$mgdm2y*1854.8*10000
+m44totp3_dm$X2012_13_mgyr<-m44totp3_dm$mgdm2y*1528.75*10000
+
+
+
+
+# ...equivalent to the amount of energy needed to support ~190,000 riparian woodland birds for..
+m44totp3_dm %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgdmy,-mgdm2y,-iter) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         gdmy = mgdmy/1000) %>%  #convert milligrams of dry mass to grams of dry mass
+  filter(reach >3) %>%
+  select(year,gdmy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,gdmy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totgdmy = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year ) %>%
+  mutate(totkJy = totgdmy*23.012,#multiply grams of dry mass by 23.012 to convert to kJ (from Cummins and Wuycheck 1971)
+         ind_bird_demand = 4600/59*120, #bird community in a hectare needs 4656 kJ/day and there are ~59 birds per community. This estimate how much energy a bird would need over the breeding and nesting season (120days = 4 months)
+         birds_supported = totkJy/ind_bird_demand) %>%
+  select(year,birds_supported,iter)%>%
+  spread(year,birds_supported)%>%
+  clean_names() %>%
+  mutate(diff9012 = x2012-x1890) %>%
+  summarize(lower95 = quantile(diff9012,probs=0.025),
+            median = median(diff9012),
+            upper95 = quantile(diff9012, probs=0.975))
+
+# ...enough to subsidize approximately...
+m44totp3_dm %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgdmy,-mgdm2y,-iter) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         gdmy = mgdmy/1000) %>%  #convert milligrams of dry mass to grams of dry mass
+  filter(reach >3) %>%
+  select(year,gdmy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,gdmy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totgdmy = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year ) %>%
+  mutate(totkJy = totgdmy*23.012,#multiply grams of dry mass by 23.012 to convert to kJ (from Cummins and Wuycheck 1971)
+         ind_bird_demand = 4600/59*120, #bird community in a hectare needs 4656 kJ/day and there are ~59 birds per community. This estimate how much energy a bird would need over the breeding and nesting season (120days = 4 months)
+         birds_supported = totkJy/ind_bird_demand) %>%
+  select(year,birds_supported,iter)%>%
+  spread(year,birds_supported)%>%
+  clean_names() %>%
+  mutate(diff9012 = x2012-x1890) %>%
+  summarize(lower95 = quantile(diff9012*4.16,probs=0.025), #multiply by 24/100 = 4.16. i.e. every bird gets 24% of it's annual budget, so each annual allotment is split among 24/100 = 4.16 birds.
+            median = median(diff9012*4.16),
+            upper95 = quantile(diff9012*4.16, probs=0.975))
+
+
+#...equivalent to the amount of energy needed to support ~190,000 riparian woodland birds for..
+m44totp3_dm %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgdmy,-mgdm2y,-iter) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         gdmy = mgdmy/1000) %>%  #convert milligrams of dry mass to grams of dry mass
+  filter(reach >3) %>%
+  select(year,gdmy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,gdmy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totgdmy = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year ) %>%
+  mutate(totkJy = totgdmy*23.012,#multiply grams of dry mass by 23.012 to convert to kJ (from Cummins and Wuycheck 1971)
+         ind_bird_demand = 3800/59*120, #bird community in a hectare needs 4656 kJ/day and there are ~59 birds per community. This estimate how much energy a bird would need over the breeding and nesting season (120days = 4 months)
+         birds_supported = totkJy/ind_bird_demand) %>%
+  select(year,birds_supported,iter)%>%
+  spread(year,birds_supported)%>%
+  clean_names() %>%
+  mutate(diff9012 = x2012-x1890) %>%
+  summarize(lower95 = quantile(diff9012,probs=0.025),
+            median = median(diff9012),
+            upper95 = quantile(diff9012, probs=0.975))
+
+
+
+
+#The amount of emergence from Missouri River off-channel habitats
+#in the early 1890s could have supported ~550,000 woodland birds 
+m44totp3_dm %>%
+  rownames_to_column("iter") %>%
+  gather(yr_reach, mgdmy,-mgdm2y,-iter) %>%
+  mutate(year = as.factor(str_sub(yr_reach,2,5)),
+         reach= as.numeric(str_remove(str_sub(yr_reach,7,8),"_")),
+         gdmy = mgdmy/1000) %>%  #convert milligrams of dry mass to grams of dry mass
+  filter(reach >3) %>%
+  select(year,gdmy,reach,iter) %>%
+  group_by(year,reach) %>%
+  spread(reach,gdmy)%>% 
+  rename(r4 = '4',
+         r8 = '8',
+         r10 = '10',
+         r11 = '11',
+         r12 = '12',
+         r13 = '13') %>%
+  mutate(totgdmy = r4+r8+r10+r11+r12+r13) %>%
+  group_by(year ) %>%
+  mutate(totkJy = totgdmy*23.012,#multiply grams of dry mass by 23.012 to convert to kJ (from Cummins and Wuycheck 1971)
+         ind_bird_demand = 4600/59*120, #bird community in a hectare needs 4656 kJ/day and there are ~59 birds per community. This estimate how much energy a bird would need over the breeding and nesting season (120days = 4 months)
+         birds_supported = totkJy/ind_bird_demand) %>%
+  summarize(lower95 = quantile(birds_supported,probs=0.025),
+            median = median(birds_supported),
+            upper95 = quantile(birds_supported, probs=0.975))
+
+
+
+
+
+
+
+
+
+
+
