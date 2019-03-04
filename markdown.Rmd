@@ -358,7 +358,7 @@ m44totp3$X1950_4_mgyr<-m44totp3$mgCm2y*181.54*10000
 m44totp3$X1950_8_mgyr<-m44totp3$mgCm2y*10.79*10000
 m44totp3$X1950_10_mgyr<-m44totp3$mgCm2y*70.42*10000
 m44totp3$X1950_11_mgyr<-m44totp3$mgCm2y*0
-m44totp3$X1950_12_mgyr<-m44totp3$mgCm2y*0
+m44totp3$X1950_12_mgyr<-m44totp3$mgCm2y*1773*10000
 m44totp3$X1950_13_mgyr<-m44totp3$mgCm2y*1213.15*10000
 m44totp3$X2006_0_mgyr<-m44totp3$mgCm2y*100.54*10000
 m44totp3$X2006_2_mgyr<-m44totp3$mgCm2y*1350.51*10000
@@ -380,7 +380,7 @@ m44totp3$X2012_13_mgyr<-m44totp3$mgCm2y*1528.75*10000
 
 
 
-## Figure 3 - Predicted annual emergence in kgC/yr for the lowest six segments.
+
 ```{r create figure 3 after some data wrangling}
 Figure3 <- m44totp3 %>%
   rownames_to_column("iter") %>%
@@ -416,7 +416,7 @@ Figure3
 
 
 
-##Emergence by segment in kgC/km/y 
+##Figure 4 - Emergence by segment in kgC/km/y 
 
 
 *Multiplying that production by the area of off-channel habitats along the lower six segments,revealed that annual insect production in 1890 ranged* 
@@ -549,7 +549,7 @@ Figure4<-ggplot(data=kgC_y,aes(x=as.factor(reach),y=kgC_m_y,fill=year))+
   #geom_text()+
   xlab(expression(paste(italic("upstream"), "                             Segment                            ",italic("downstream"))))+
   ylab("Predicted annual emergence from backwaters (kgC/km/yr)")+
-  annotate("text",x=c(1.26,2.26,5.92,6.92),y=10,label="NA",size=2)+
+  annotate("text",x=c(1.26,2.26,6.92),y=10,label="NA",size=2)+
   theme_classic()+
   theme(text=element_text(size=13))
 Figure4
@@ -970,7 +970,7 @@ m44totp3_dm$X1950_4_mgyr<-m44totp3_dm$mgdm2y*181.54*10000
 m44totp3_dm$X1950_8_mgyr<-m44totp3_dm$mgdm2y*10.79*10000
 m44totp3_dm$X1950_10_mgyr<-m44totp3_dm$mgdm2y*70.42*10000
 m44totp3_dm$X1950_11_mgyr<-m44totp3_dm$mgdm2y*0
-m44totp3_dm$X1950_12_mgyr<-m44totp3_dm$mgdm2y*0
+m44totp3_dm$X1950_12_mgyr<-m44totp3_dm$mgdm2y*1773*10000
 m44totp3_dm$X1950_13_mgyr<-m44totp3_dm$mgdm2y*1213.15*10000
 m44totp3_dm$X2006_0_mgyr<-m44totp3_dm$mgdm2y*100.54*10000
 m44totp3_dm$X2006_2_mgyr<-m44totp3_dm$mgdm2y*1350.51*10000
